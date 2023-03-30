@@ -10,9 +10,24 @@ import subprocess
 import sys
 
 
-def check_database_name(name):
+class PsqlOptions:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        user: str,
+        password: str,
+        database: str,
+    ):
+        self.host = host
+        self.port = port
+        self.user = user
+        self.password = password
+        self.database = database
+
+def check_args(psql_options):
     try:
-        out = db_out(name, "SELECT 42", stderr=None)
+        out = db_out(psql_options, "SELECT 42", stderr=None)
     except subprocess.CalledProcessError:
         raise argparse.ArgumentTypeError(
             'Can not access DB using psql. Probably it does not exists.'
@@ -22,8 +37,6 @@ def check_database_name(name):
         raise argparse.ArgumentTypeError(
             'Unknown problem executing SQL statements using psql. Aborting.'
         )
-
-    return name
 
 
 def check_diff_directory(name):
@@ -43,63 +56,72 @@ def check_diff_directory(name):
 def parser_arguments():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--db1', help='First DB name',
-                        type=check_database_name, required=True)
-    parser.add_argument('--db2', help='Second DB name',
-                        type=check_database_name, required=True)
+    parser.add_argument('--db1', help='First DB name', required=True)
+    parser.add_argument('--host1', help='First host name', required=True)
+    parser.add_argument('--port1', help='First host port used', required=True)
+    parser.add_argument('--user1', help='First host username', required=True)
+    parser.add_argument('--pass1', help='First host password', required=True)
+    parser.add_argument('--db2', help='Second DB name', required=True)
+    parser.add_argument('--host2', help='Second host name', required=True)
+    parser.add_argument('--port2', help='Second host port used', required=True)
+    parser.add_argument('--user2', help='Second host username', required=True)
+    parser.add_argument('--pass2', help='Second host password', required=True)
     parser.add_argument('--diff-folder',
                         help='Directory to output diffs',
-                        type=check_diff_directory, required=False)
+                        required=False)
     parser.add_argument('--rowcount',
                         help='Compare tables row count',
+                        action='store_true')
+    parser.add_argument('--tables-only',
+                        help='only compare tables',
                         action='store_true')
 
     return parser.parse_args()
 
 
-def db_out(db_name, cmd, stderr=subprocess.STDOUT):
+def db_out(psql_options, cmd, stderr=subprocess.STDOUT, extra_opts=''):
     return subprocess.check_output(
-        "psql -d '{}' -c '{}'".format(db_name, cmd), shell=True, stderr=stderr
+        f"PGPASSWORD='{psql_options.password}' psql -h '{psql_options.host}' "
+        f"-p '{psql_options.port}' -U '{psql_options.user}' -d '{psql_options.database}' "
+        f"{extra_opts} -c '{cmd}'", shell=True, stderr=stderr
     ).decode('utf-8')
 
 
-def get_table_rowcount(db_name, table_name, stderr=subprocess.STDOUT):
+def get_table_rowcount(psql_options, table_name, stderr=subprocess.STDOUT):
     cmd = 'select count(1) from "{}";'.format(table_name)
-    output = subprocess.check_output(
-        "psql -d '{}' -c '{}' --quiet --tuples-only".format(db_name, cmd), shell=True, stderr=stderr
-    ).decode('utf-8')
+    output = db_out(psql_options, cmd, extra_opts='--quiet --tuples-only')
     return int(output.strip())
 
 
-def get_db_tables(db_name):
+def get_db_tables(psql_options):
     tables = set()
-    for line in db_out(db_name, '\\dt').splitlines():
+    for line in db_out(psql_options, '\\dt').splitlines():
         elems = line.split()
         if line and elems[0] == 'public':
             tables.add(elems[2])
     return tables
 
 
-def get_db_views(db_name):
+def get_db_views(psql_options):
     views = set()
-    for line in db_out(db_name, '\\dv').splitlines():
+    for line in db_out(psql_options, '\\dv').splitlines():
         elems = line.split()
         if line and elems[0] == 'public':
             views.add(elems[2])
     return views
 
 
-def get_db_mat_views(db_name):
+def get_db_mat_views(psql_options):
     views = set()
-    for line in db_out(db_name, '\\dmv').splitlines():
+    for line in db_out(psql_options, '\\dmv').splitlines():
         elems = line.split()
         if line and elems[0] == 'public':
             views.add(elems[2])
     return views
 
 
-def get_table_definition(db_name, table_name):
-    lines = db_out(db_name, '\\d "{}"'.format(table_name)).splitlines()
+def get_table_definition(psql_options, table_name):
+    lines = db_out(psql_options, '\\d "{}"'.format(table_name)).splitlines()
     lines = [x for x in lines if x.strip()]
 
     columns_range = [None, None]
@@ -199,95 +221,104 @@ def get_table_definition(db_name, table_name):
     return '\n'.join(lines)
 
 
-def compare_number_of_items(options, db1_items, db2_items, items_name):
+def compare_number_of_items(db1_items, db2_items, items_name):
     if db1_items != db2_items:
         additional_db1 = db1_items - db2_items
         additional_db2 = db2_items - db1_items
 
         if additional_db1:
-            sys.stdout.write(
-                '{}: additional in "{}"\n'.format(items_name, options.db1)
+            print(
+                '{}: additional in first db\n'.format(items_name)
             )
             for t in additional_db1:
-                sys.stdout.write('\t{}\n'.format(t))
-            sys.stdout.write('\n')
+                print('\t{}\n'.format(t))
+            print('\n')
 
         if additional_db2:
-            sys.stdout.write(
-                '{}: additional in "{}"\n'.format(items_name, options.db2)
+            print(
+                '{}: additional in second db\n'.format(items_name)
             )
             for t in additional_db2:
-                sys.stdout.write('\t{}\n'.format(t))
-            sys.stdout.write('\n')
+                print('\t{}\n'.format(t))
+            print('\n')
 
 
 # TODO: Using same function to compare tables and views. It is not very suited
 # for views. But I do not see any clear way to have cleaner interface
-def compare_each_table(options, db1_tables, db2_tables, items_name):
+def compare_each_table(diff_folder, db1_tables, db2_tables, psql_options1, psql_options2 ,items_name, rowcount=False):
     not_matching_tables = []
     not_matching_rowcount = []
 
     for t in sorted(db1_tables & db2_tables):
-        t1 = get_table_definition(options.db1, t)
-        t2 = get_table_definition(options.db2, t)
+        t1 = get_table_definition(psql_options1, t)
+        t2 = get_table_definition(psql_options2, t)
         if t1 != t2:
             not_matching_tables.append(t)
 
             diff = difflib.unified_diff(
                 [x + '\n' for x in t1.splitlines()],
                 [x + '\n' for x in t2.splitlines()],
-                '{}.{}.{}'.format(items_name, options.db1, t),
-                '{}.{}.{}'.format(items_name, options.db2, t),
+                '{}.{}.{}'.format(items_name, psql_options1.database, t),
+                '{}.{}.{}'.format(items_name, psql_options2.database, t),
                 n=sys.maxsize
             )
 
-            if options.diff_folder:
-                if not os.path.exists(options.diff_folder):
-                    os.mkdir(options.diff_folder)
+            if diff_folder:
+                if not os.path.exists(diff_folder):
+                    os.mkdir(diff_folder)
                 filepath = os.path.join(
-                    options.diff_folder, '{}.diff'.format(t)
+                    diff_folder, '{}.diff'.format(t)
                 )
                 with open(filepath, 'w') as f:
                     for diff_line in diff:
                         f.write(diff_line)
 
-        elif options.rowcount:
-            t1_rowcount = get_table_rowcount(options.db1, t)
-            t2_rowcount = get_table_rowcount(options.db2, t)
+        elif rowcount:
+            t1_rowcount = get_table_rowcount(psql_options1, t)
+            t2_rowcount = get_table_rowcount(psql_options2, t)
             if t1_rowcount != t2_rowcount:
                 not_matching_rowcount.append('{} ({} != {})'.format(t, t1_rowcount, t2_rowcount))
 
     if not_matching_tables:
-        sys.stdout.write('{}: not matching\n'.format(items_name))
+        print('{}: not matching\n'.format(items_name))
         for t in not_matching_tables:
-            sys.stdout.write('\t{}\n'.format(t))
-        sys.stdout.write('\n')
+            print('\t{}\n'.format(t))
+        print('\n')
 
     if not_matching_rowcount:
-        sys.stdout.write('{}: not matching rowcount\n'.format(items_name))
+        print('{}: not matching rowcount\n'.format(items_name))
         for t in not_matching_rowcount:
-            sys.stdout.write('\t{}\n'.format(t))
-        sys.stdout.write('\n')
+            print('\t{}\n'.format(t))
+        print('\n')
 
 
 def main():
     options = parser_arguments()
 
-    db1_tables = get_db_tables(options.db1)
-    db2_tables = get_db_tables(options.db2)
+    db1_options = PsqlOptions(options.host1, options.port1, options.user1, options.pass1, options.db1)
+    db2_options = PsqlOptions(options.host2, options.port2, options.user2, options.pass2, options.db2)
 
-    compare_number_of_items(options, db1_tables, db2_tables, 'TABLES')
-    compare_each_table(options, db1_tables, db2_tables, 'TABLES')
+    check_args(db1_options)
+    check_args(db2_options)
 
-    db1_views = get_db_views(options.db1)
-    db2_views = get_db_views(options.db2)
-    compare_number_of_items(options, db1_views, db2_views, 'VIEWS')
-    compare_each_table(options, db1_views, db2_views, 'VIEWS')
-    
-    db1_views = get_db_mat_views(options.db1)
-    db2_views = get_db_mat_views(options.db2)
-    compare_number_of_items(options, db1_views, db2_views, 'MATERIALIZED VIEWS')
-    compare_each_table(options, db1_views, db2_views, 'MATERIALIZED VIEWS')
+    db1_tables = get_db_tables(db1_options)
+    db2_tables = get_db_tables(db2_options)
+
+    compare_number_of_items(db1_tables, db2_tables, 'TABLES')
+    compare_each_table(options.diff_folder, db1_tables, db2_tables, db1_options, db2_options, 'TABLES', options.rowcount)
+
+    if options.tables_only:
+        return
+
+    db1_views = get_db_views(db1_options)
+    db2_views = get_db_views(db2_options)
+    compare_number_of_items(db1_views, db2_views, 'VIEWS')
+    compare_each_table(options.diff_folder, db1_views, db2_views, db1_options, db2_options, 'VIEWS', options.rowcount)
+
+    db1_views = get_db_mat_views(db1_options)
+    db2_views = get_db_mat_views(db2_options)
+    compare_number_of_items(db1_views, db2_views, 'MATERIALIZED VIEWS')
+    compare_each_table(options.diff_folder, db1_views, db2_views, db1_options, db2_options, 'MATERIALIZED VIEWS', options.rowcount)
 
 
 if __name__ == "__main__":
